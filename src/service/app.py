@@ -8,6 +8,7 @@ it immediately instead of from a rising latency curve.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import time
 from collections.abc import AsyncIterator
@@ -16,6 +17,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from service import metrics, preprocess
@@ -83,25 +85,24 @@ async def segment(websocket: WebSocket) -> None:
     settings: Settings = app.state.settings
     batcher: Batcher = app.state.batcher
     engine = app.state.engine
+    send_lock = asyncio.Lock()
 
-    try:
-        while True:
-            payload = await websocket.receive_bytes()
-            metrics.frames_received.inc()
-            started = time.perf_counter()
-
-            try:
-                decoded = preprocess.decode(payload, settings.input_size)
-            except Exception as exc:
+    async def handle(payload: bytes, started: float) -> None:
+        """One frame, start to reply."""
+        try:
+            decoded = await asyncio.to_thread(preprocess.decode, payload, settings.input_size)
+        except Exception as exc:
+            async with send_lock:
                 await websocket.send_json({"type": "error", "detail": f"decode failed: {exc}"})
-                continue
+            return
 
-            try:
-                mask = await batcher.submit(decoded.tensor)
-            except QueueFull:
-                # Told immediately, while the frame is still current. A client
-                # that keeps sending regardless will keep being refused, which
-                # is the point: the service sheds load instead of lagging.
+        try:
+            mask = await batcher.submit(decoded.tensor)
+        except QueueFull:
+            # Told immediately, while the frame is still current. A client that
+            # keeps sending regardless keeps being refused, which is the point:
+            # the service sheds load instead of lagging.
+            async with send_lock:
                 await websocket.send_json(
                     {
                         "type": "dropped",
@@ -109,17 +110,18 @@ async def segment(websocket: WebSocket) -> None:
                         "max_outstanding": settings.max_queue_depth,
                     }
                 )
-                continue
+            return
 
-            png = preprocess.encode_mask(mask)
-            elapsed_ms = (time.perf_counter() - started) * 1000.0
+        png = preprocess.encode_mask(mask)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
 
-            metrics.frame_latency.observe(elapsed_ms / 1000.0)
-            metrics.frames_processed.inc()
-            within_budget = elapsed_ms <= FRAME_BUDGET_MS
-            if not within_budget:
-                metrics.budget_misses.inc()
+        metrics.frame_latency.observe(elapsed_ms / 1000.0)
+        metrics.frames_processed.inc()
+        within_budget = elapsed_ms <= FRAME_BUDGET_MS
+        if not within_budget:
+            metrics.budget_misses.inc()
 
+        async with send_lock:
             await websocket.send_json(
                 {
                     "type": "mask",
@@ -129,8 +131,23 @@ async def segment(websocket: WebSocket) -> None:
                     "engine": engine.name,
                 }
             )
+
+    # Frames are handled as tasks rather than awaited in the read loop.
+    # Awaiting each mask before reading the next one meant a single connection
+    # could never have more than one frame outstanding, so the queue never
+    # filled, the batcher never batched, and the drop policy was unreachable
+    # code -- all of it passing tests that drove the Batcher directly.
+    pending: set[asyncio.Task[None]] = set()
+    try:
+        while True:
+            payload = await websocket.receive_bytes()
+            metrics.frames_received.inc()
+            task = asyncio.create_task(handle(payload, time.perf_counter()))
+            pending.add(task)
+            task.add_done_callback(pending.discard)
     except WebSocketDisconnect:
-        return
+        for task in pending:
+            task.cancel()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -144,3 +161,10 @@ async def index() -> Response:
         f"Budget: {FRAME_BUDGET_MS:.1f} ms at p95 ({TARGET_FPS} FPS)\n"
         "Endpoints: /health  /metrics  /ws/segment\n"
     )
+
+
+# Mounted last so it cannot shadow the routes above. StaticFiles serves byte
+# ranges, which the sample clip needs: without range support a browser cannot
+# seek, and Safari will not play the file at all.
+if _STATIC.is_dir():
+    app.mount("/", StaticFiles(directory=_STATIC), name="static")

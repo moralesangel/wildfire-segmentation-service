@@ -99,17 +99,24 @@
         <div id="stage">
           <video id="video" playsinline muted loop></video>
           <canvas id="overlay"></canvas>
-          <div class="hint" id="hint">Load a video or use your camera to start streaming frames.</div>
+          <div class="hint" id="hint">Press <b>Sample clip</b> for 16 seconds of real drone footage, or load your own.</div>
         </div>
         <div class="controls">
+          <button id="sample" class="primary">Sample clip</button>
           <label class="file">Load video<input type="file" id="file" accept="video/*"></label>
           <button id="camera">Use camera</button>
-          <button id="toggle" class="primary" disabled>Start</button>
+          <button id="toggle" disabled>Start</button>
           <button id="stress" disabled title="Send frames as fast as possible to force the queue to overflow">Stress test</button>
         </div>
         <p class="note" style="margin:10px 0 0">
           The mask is returned at the model's own resolution and scaled here by the browser.
           Upscaling it server-side cost 237&nbsp;ms a frame and added no information.
+        </p>
+        <p class="note" style="margin:8px 0 0">
+          <strong>About the sample clip:</strong> it comes from the same drone flight the model
+          was trained on, so it flatters the model &mdash; treat it as a demonstration of the
+          service, not as evidence of how the model generalises. Your own footage is the
+          honest test.
         </p>
       </div>
 
@@ -291,24 +298,45 @@ $("stress").addEventListener("click", () => {
   $("stress").textContent = stressing ? "Stop stressing" : "Stress test";
 });
 
+$("sample").addEventListener("click", () => {
+  // 240 consecutive frames of the FLAME drone flight, which is what the model
+  // was trained on -- so this shows the model on its own distribution rather
+  // than on whatever a webcam happens to see.
+  video.srcObject = null;
+  video.src = "sample.mp4";
+  video.loop = true;
+  $("hint").remove();
+  $("toggle").disabled = false;
+  $("toggle").classList.add("primary");
+  $("sample").classList.remove("primary");
+  $("stageTitle").textContent = "Sample clip · FLAME drone footage";
+});
+
 $("file").addEventListener("change", (event) => {
   const file = event.target.files[0];
   if (!file) return;
+  video.srcObject = null;
   video.src = URL.createObjectURL(file);
   video.loop = true;
-  $("hint").hidden = true;
+  $("hint")?.remove();
   $("toggle").disabled = false;
+  $("toggle").classList.add("primary");
+  $("sample").classList.remove("primary");
   $("stageTitle").textContent = file.name;
 });
 
 $("camera").addEventListener("click", async () => {
   try {
+    video.removeAttribute("src");
     video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-    $("hint").hidden = true;
+    $("hint")?.remove();
     $("toggle").disabled = false;
+    $("toggle").classList.add("primary");
+    $("sample").classList.remove("primary");
     $("stageTitle").textContent = "Camera";
   } catch (err) {
-    $("hint").textContent = "Camera unavailable: " + err.message;
+    const hint = $("hint");
+    if (hint) hint.textContent = "Camera unavailable: " + err.message;
   }
 });
 

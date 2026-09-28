@@ -94,3 +94,29 @@ class TestSegmentStream:
             # The socket survives, so one bad frame does not end the stream.
             ws.send_bytes(_jpeg())
             assert ws.receive_json()["type"] == "mask"
+
+
+class TestConcurrentFrames:
+    """The read loop must not wait for a mask before reading the next frame.
+
+    It used to. Awaiting each result inline meant one connection could never
+    have more than a single frame outstanding, so the queue never filled, the
+    batcher never batched, and the drop policy was unreachable code. Every
+    test still passed, because they drove the Batcher directly and never went
+    through the websocket.
+    """
+
+    def test_a_burst_overflows_the_queue(self, client: TestClient) -> None:
+        settings = app.state.settings
+        burst = settings.max_queue_depth * 6
+
+        with client.websocket_connect("/ws/segment") as ws:
+            for _ in range(burst):
+                ws.send_bytes(_jpeg())
+            kinds = [ws.receive_json()["type"] for _ in range(burst)]
+
+        assert "dropped" in kinds, (
+            f"{burst} frames at once produced no drops with a bound of "
+            f"{settings.max_queue_depth}; frames are being processed one at a time"
+        )
+        assert "mask" in kinds, "everything was dropped; nothing was served"
