@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -25,7 +26,29 @@ from service.batcher import Batcher, QueueFull
 from service.config import FRAME_BUDGET_MS, TARGET_FPS, Settings
 from service.engine import load_engine
 
-_STATIC = Path(__file__).resolve().parents[2] / "static"
+
+def _static_dir() -> Path:
+    """Where the demo page and its sample clip live.
+
+    Checked in order rather than assumed from __file__: the repo layout puts
+    static/ two levels up from this module, but an installed package has no
+    such parent, and the Docker image copies it next to the working directory.
+    An override exists because both guesses are wrong somewhere.
+    """
+    if override := os.getenv("WFS_STATIC_DIR"):
+        return Path(override)
+
+    candidates = [
+        Path(__file__).resolve().parents[2] / "static",  # running from the repo
+        Path.cwd() / "static",  # the Docker image's layout
+    ]
+    for candidate in candidates:
+        if (candidate / "index.html").is_file():
+            return candidate
+    return candidates[0]
+
+
+_STATIC = _static_dir()
 
 
 @asynccontextmanager
@@ -65,6 +88,11 @@ async def health() -> dict[str, object]:
         "model_loaded": engine.name != "stub",
         "target_fps": TARGET_FPS,
         "frame_budget_ms": round(FRAME_BUDGET_MS, 1),
+        # Reported because a missing static dir shows up as a 404 on the
+        # sample clip, which looks like a broken video rather than a
+        # misconfigured path.
+        "static_dir": str(_STATIC),
+        "sample_clip": (_STATIC / "sample.mp4").is_file(),
     }
 
 
