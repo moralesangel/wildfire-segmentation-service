@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wildfire Segmentation</title>
+<meta name="description" content="A wildfire segmentation model served under a stated latency budget, with the budget measured live.">
+<style>
+  :root {
+    --bg:#0a0e16; --panel:#121826; --line:#1f2937;
+    --text:#e6ecf5; --muted:#94a3b8;
+    --accent:#38bdf8; --good:#4ade80; --bad:#f87171; --warn:#fbbf24;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg:#f4f6fa; --panel:#fff; --line:#e2e8f0;
+      --text:#0f172a; --muted:#64748b;
+      --accent:#0369a1; --good:#15803d; --bad:#dc2626; --warn:#b45309;
+    }
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    padding:28px 16px 56px;
+  }
+  .wrap { max-width:1060px; margin:0 auto; }
+  header { text-align:center; margin-bottom:22px; }
+  h1 { font-size:1.6rem; margin:0 0 6px; letter-spacing:-.02em; }
+  .sub { color:var(--muted); margin:0; }
+  .sub a { color:var(--accent); }
+  h2 { font-size:1rem; margin:0 0 12px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:16px; }
+
+  .budget {
+    text-align:center; font-family:ui-monospace,monospace; font-size:.9rem;
+    border-left:3px solid var(--accent); padding-left:12px; text-align:left;
+  }
+  .budget b { color:var(--accent); }
+
+  .layout { display:grid; grid-template-columns:1.45fr 1fr; gap:16px; align-items:start; }
+  @media (max-width:820px) { .layout { grid-template-columns:1fr; } }
+
+  #stage { position:relative; width:100%; aspect-ratio:16/9; background:#000; border-radius:10px; overflow:hidden; border:1px solid var(--line); }
+  #stage video, #stage canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+  #overlay { mix-blend-mode:screen; opacity:.75; }
+  .hint { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+          color:var(--muted); font-size:.9rem; text-align:center; padding:20px; }
+
+  .controls { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  button, label.file {
+    font:inherit; font-size:.85rem; cursor:pointer; padding:7px 14px; border-radius:999px;
+    background:transparent; color:var(--text); border:1px solid var(--line);
+  }
+  button:hover, label.file:hover { border-color:var(--accent); }
+  button[disabled] { opacity:.45; cursor:not-allowed; }
+  button.primary { background:color-mix(in srgb,var(--accent) 20%,transparent); border-color:var(--accent); color:var(--accent); }
+  input[type=file] { display:none; }
+
+  .stat { display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px dashed var(--line); font-size:.88rem; }
+  .stat:last-child { border-bottom:0; }
+  .stat b { font-family:ui-monospace,monospace; font-weight:600; }
+  .good { color:var(--good); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+
+  .bar { height:8px; border-radius:99px; background:color-mix(in srgb,var(--text) 10%,transparent); overflow:hidden; margin-top:4px; }
+  .bar div { height:100%; background:var(--good); transition:width .2s, background .2s; }
+  .bar div.over { background:var(--bad); }
+
+  .note { font-size:.85rem; color:var(--muted); }
+  .note strong { color:var(--text); }
+  .warnbox { border-left:3px solid var(--warn); padding-left:12px; }
+  code { font-family:ui-monospace,monospace; font-size:.86em; background:color-mix(in srgb,var(--text) 9%,transparent); padding:1px 5px; border-radius:4px; }
+  footer { text-align:center; color:var(--muted); font-size:.85rem; margin-top:26px; }
+  footer a { color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Wildfire Segmentation</h1>
+    <p class="sub">A U-Net served under a stated latency budget &middot;
+      <a id="repo" href="https://github.com/moralesangel/wildfire-segmentation-service" target="_blank" rel="noopener">source</a></p>
+  </header>
+
+  <div class="panel budget">
+    Budget: <b>66.7 ms at p95</b> (15 FPS), measured end to end &mdash; decode, inference, encode.
+    Stated before it was measured, and reported below whether or not it holds.
+  </div>
+
+  <div class="panel warnbox note" id="stubWarning" hidden>
+    <strong>No trained model loaded.</strong> The service is serving a stub engine, so the
+    masks below are a placeholder, not predictions. The latency numbers are still real.
+  </div>
+
+  <div class="layout">
+    <div>
+      <div class="panel">
+        <h2 id="stageTitle">Feed</h2>
+        <div id="stage">
+          <video id="video" playsinline muted loop></video>
+          <canvas id="overlay"></canvas>
+          <div class="hint" id="hint">Load a video or use your camera to start streaming frames.</div>
+        </div>
+        <div class="controls">
+          <label class="file">Load video<input type="file" id="file" accept="video/*"></label>
+          <button id="camera">Use camera</button>
+          <button id="toggle" class="primary" disabled>Start</button>
+          <button id="stress" disabled title="Send frames as fast as possible to force the queue to overflow">Stress test</button>
+        </div>
+        <p class="note" style="margin:10px 0 0">
+          The mask is returned at the model's own resolution and scaled here by the browser.
+          Upscaling it server-side cost 237&nbsp;ms a frame and added no information.
+        </p>
+      </div>
+
+      <div class="panel note">
+        <h2>What happens under overload</h2>
+        <p style="margin:0 0 10px">
+          Press <strong>Stress test</strong> and watch <em>dropped</em> climb while latency stays flat.
+          That is the design: when the queue is full the service refuses the frame and says so,
+          rather than accepting it and falling behind.
+        </p>
+        <p style="margin:0">
+          An unbounded queue would not make it faster. It would convert overload into staleness &mdash;
+          every frame still processed, each one further behind reality. For a live feed that is worse
+          than a gap.
+        </p>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h2>Live</h2>
+        <div id="live"></div>
+        <div class="bar"><div id="bar" style="width:0%"></div></div>
+        <p class="note" style="margin:8px 0 0;font-size:.78rem">Latest frame against the 66.7 ms budget.</p>
+      </div>
+
+      <div class="panel">
+        <h2>This session</h2>
+        <div id="session"></div>
+      </div>
+
+      <div class="panel note">
+        <h2>Where the budget goes</h2>
+        <p style="margin:0">
+          On a 4K source frame the <strong>decode dominates</strong>, at roughly four times the
+          inference it feeds. The model was never the bottleneck &mdash; which is why measuring
+          only model latency ships a service that cannot hold frame rate.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <span id="engineLine"></span>
+    <br>Prometheus metrics at <code>/metrics</code>, health at <code>/health</code>.
+  </footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const BUDGET_MS = 66.7;
+
+const video = $("video");
+const overlay = $("overlay");
+const ctx = overlay.getContext("2d");
+const scratch = document.createElement("canvas");
+const sctx = scratch.getContext("2d");
+
+let socket = null, running = false, stressing = false, inFlight = false;
+const samples = [];
+let dropped = 0, processed = 0, misses = 0;
+
+fetch("health").then((r) => r.json()).then((h) => {
+  $("engineLine").textContent = `engine: ${h.engine} · target ${h.target_fps} FPS · budget ${h.frame_budget_ms} ms`;
+  if (!h.model_loaded) $("stubWarning").hidden = false;
+}).catch(() => {});
+
+const fmt = (v, n = 1) => (v === null || v === undefined ? "—" : v.toFixed(n));
+const row = (label, value, cls) =>
+  `<div class="stat"><span>${label}</span><b class="${cls || ""}">${value}</b></div>`;
+
+function percentile(values, p) {
+  if (!values.length) return null;
+  const ordered = [...values].sort((a, b) => a - b);
+  return ordered[Math.min(ordered.length - 1, Math.floor(ordered.length * p))];
+}
+
+function renderStats(latest) {
+  const cls = latest === null ? "" : latest <= BUDGET_MS ? "good" : "bad";
+  $("live").innerHTML =
+    row("Latest", latest === null ? "—" : `${fmt(latest)} ms`, cls) +
+    row("Budget", `${BUDGET_MS} ms`);
+  const pct = latest === null ? 0 : Math.min(100, (latest / BUDGET_MS) * 100);
+  const bar = $("bar");
+  bar.style.width = `${pct}%`;
+  bar.classList.toggle("over", latest !== null && latest > BUDGET_MS);
+
+  const p50 = percentile(samples, 0.5), p95 = percentile(samples, 0.95);
+  const withinCls = p95 === null ? "" : p95 <= BUDGET_MS ? "good" : "bad";
+  $("session").innerHTML =
+    row("p50", p50 === null ? "—" : `${fmt(p50)} ms`) +
+    row("p95", p95 === null ? "—" : `${fmt(p95)} ms`, withinCls) +
+    row("Sustainable", p95 ? `${fmt(1000 / p95)} FPS` : "—", withinCls) +
+    row("Processed", processed) +
+    row("Dropped", dropped, dropped ? "warn" : "") +
+    row("Over budget", `${misses} / ${processed}`, misses ? "warn" : "good");
+}
+
+function connect() {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  socket = new WebSocket(`${scheme}://${location.host}/ws/segment`);
+  socket.binaryType = "arraybuffer";
+
+  socket.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    inFlight = false;
+
+    if (msg.type === "dropped") { dropped += 1; renderStats(null); return; }
+    if (msg.type === "error") { console.warn(msg.detail); return; }
+
+    processed += 1;
+    samples.push(msg.latency_ms);
+    if (samples.length > 300) samples.shift();
+    if (!msg.within_budget) misses += 1;
+
+    const img = new Image();
+    img.onload = () => {
+      overlay.width = video.videoWidth || 640;
+      overlay.height = video.videoHeight || 360;
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      // Tint the single-channel mask red, then let the canvas scale it up.
+      ctx.drawImage(img, 0, 0, overlay.width, overlay.height);
+      ctx.globalCompositeOperation = "multiply";
+      ctx.fillStyle = "#ff3b30";
+      ctx.fillRect(0, 0, overlay.width, overlay.height);
+      ctx.globalCompositeOperation = "source-over";
+    };
+    img.src = "data:image/png;base64," + msg.mask_png_b64;
+
+    renderStats(msg.latency_ms);
+  };
+
+  socket.onclose = () => { running = false; $("toggle").textContent = "Start"; };
+}
+
+function sendFrame() {
+  if (!running || !socket || socket.readyState !== WebSocket.OPEN) return;
+  if (inFlight && !stressing) return;  // one outstanding frame unless stressing
+  if (!video.videoWidth) return;
+
+  scratch.width = video.videoWidth;
+  scratch.height = video.videoHeight;
+  sctx.drawImage(video, 0, 0);
+  scratch.toBlob(
+    (blob) => blob && blob.arrayBuffer().then((buf) => {
+      if (socket.readyState === WebSocket.OPEN) { inFlight = true; socket.send(buf); }
+    }),
+    "image/jpeg",
+    0.85,
+  );
+}
+
+let timer = null;
+function loop() {
+  sendFrame();
+  // Stressing sends as fast as the browser allows, to overflow the queue on
+  // purpose. Otherwise it paces at the target rate.
+  timer = setTimeout(loop, stressing ? 0 : 1000 / 15);
+}
+
+$("toggle").addEventListener("click", () => {
+  running = !running;
+  $("toggle").textContent = running ? "Stop" : "Start";
+  $("stress").disabled = !running;
+  if (running) {
+    if (!socket || socket.readyState > 1) connect();
+    video.play().catch(() => {});
+    loop();
+  } else {
+    clearTimeout(timer);
+    stressing = false;
+    $("stress").textContent = "Stress test";
+    video.pause();
+  }
+});
+
+$("stress").addEventListener("click", () => {
+  stressing = !stressing;
+  $("stress").textContent = stressing ? "Stop stressing" : "Stress test";
+});
+
+$("file").addEventListener("change", (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+  video.src = URL.createObjectURL(file);
+  video.loop = true;
+  $("hint").hidden = true;
+  $("toggle").disabled = false;
+  $("stageTitle").textContent = file.name;
+});
+
+$("camera").addEventListener("click", async () => {
+  try {
+    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    $("hint").hidden = true;
+    $("toggle").disabled = false;
+    $("stageTitle").textContent = "Camera";
+  } catch (err) {
+    $("hint").textContent = "Camera unavailable: " + err.message;
+  }
+});
+
+renderStats(null);
+</script>
+</body>
+</html>
