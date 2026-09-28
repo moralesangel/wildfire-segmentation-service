@@ -22,6 +22,30 @@ the model is how a service ships at three times its stated latency.
 It is written in [`config.py`](src/service/config.py) and asserted in the tests,
 so it cannot quietly become whatever the benchmark happened to produce.
 
+## The result
+
+**The budget holds.** With the trained U-Net, measured end to end on an idle
+machine:
+
+| Stage | p50 | p95 | share |
+|---|---|---|---|
+| decode | 44.5 ms | 48.1 ms | **80.9%** |
+| inference | 9.9 ms | 11.1 ms | 18.0% |
+| encode | 0.4 ms | 0.5 ms | 0.7% |
+| **total** | **54.9 ms** | **58.6 ms** | |
+
+58.6 ms against a 66.7 ms budget: **within, at 17.1 FPS sustainable**.
+
+And the point of the exercise is in the third column. **Decoding one 4K frame
+costs four and a half times the inference it feeds.** A service that reported
+model latency would have called itself fast at 9.9 ms while spending 81% of its
+budget somewhere it never looked.
+
+The model: Dice **0.889**, IoU **0.800**, recall 0.895, precision 0.883 on a
+held-out fifth of FLAME. 1.9M parameters. Best epoch was 40 of 40 — it hit the
+budget still improving, so this is a floor rather than the architecture's
+ceiling.
+
 ## What the measurement found
 
 Two things, and the first one contradicted the design.
@@ -32,6 +56,8 @@ mask upscaled to the source frame's 3840×2160, because that is what a client
 resolution — nearly 800×, and 2.3 MB on the wire instead of 16 KB — to produce
 pixels carrying no information the 128×128 mask did not already have. The client
 scales it while compositing, which its GPU does for free.
+
+Measured with the stub engine, before and after:
 
 | Stage | Before | After |
 |---|---|---|
@@ -108,20 +134,39 @@ python scripts/benchmark.py --frames 40 --sizes 128,256   # where the budget goe
 python -m pytest -q                                        # 13 tests
 ```
 
+## Reproducing it
+
+```bash
+# 1. Cache the 4K frames at 256x256 (5.3 GB -> 282 MB, runs once)
+python scripts/prepare_data.py --images Images.zip --masks Masks.zip
+
+# 2. Train (40 epochs, ~40 s each on 14 CPU cores)
+python scripts/train.py --epochs 40 --size 128 --base 16
+
+# 3. Export, with parity against PyTorch checked and the file deleted if it fails
+python scripts/export_onnx.py
+
+# 4. Measure
+python scripts/benchmark.py --frames 60 --sizes 128
+```
+
+The export reported `max |pytorch - onnx| = 8.08e-06` against a 1e-5 tolerance,
+and `max |batched - single| = 0.0` — batching does not change per-item results,
+so a frame's mask does not depend on who it was batched with.
+
 ## Status
 
-The service is complete and measured. **The model is not trained yet** — the
-numbers above come from the stub engine, whose 8.6 ms is a stand-in rather than
-a prediction of the real U-Net's cost.
+Trained, exported, measured, and within budget. 28 tests, CI green.
 
 Outstanding:
 
-- [ ] Train the U-Net on FLAME (item 9 + masks), reusing the pipeline from
-      [brain-tumor-segmentation](https://github.com/moralesangel/brain-tumor-segmentation)
-- [ ] Export to ONNX with numerical parity verified against PyTorch
-- [ ] Re-measure with the real model and publish the honest FPS
-- [ ] Deploy to Hugging Face Spaces (its free tier is CPU; the budget may not
-      hold there, and this README will say so either way)
+- [ ] Deploy to Hugging Face Spaces. Its free tier is 2 vCPU against the 14
+      cores measured here, so **the budget will probably not hold there**. The
+      deployed numbers will be published next to these either way.
+- [ ] Multi-seed runs. Dice 0.889 is one run on one split, which makes it an
+      observation rather than a measurement.
+- [ ] Raise the epoch cap. Best epoch was 40 of 40, so training stopped on
+      budget rather than on convergence.
 
 ## Data
 

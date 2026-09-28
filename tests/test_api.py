@@ -36,12 +36,13 @@ class TestHealth:
         assert body["status"] == "ok"
         assert body["frame_budget_ms"] == pytest.approx(FRAME_BUDGET_MS, abs=0.1)
 
-    def test_health_admits_when_there_is_no_model(self, client: TestClient) -> None:
-        """Without a checkpoint the service still serves, so it has to say so.
-        A stub mask that passed for a prediction would be the worst outcome."""
+    def test_health_says_which_engine_is_answering(self, client: TestClient) -> None:
+        """The claim to protect is not "there is no model" -- that changes the
+        moment one is exported. It is that the two fields never disagree, so a
+        stub mask can never be read as a prediction."""
         body = client.get("/health").json()
-        assert body["model_loaded"] is False
-        assert body["engine"] == "stub"
+        assert body["engine"] in {"stub", "onnx"}
+        assert body["model_loaded"] == (body["engine"] != "stub")
 
 
 class TestMetrics:
@@ -64,7 +65,9 @@ class TestSegmentStream:
             reply = ws.receive_json()
 
         assert reply["type"] == "mask"
-        assert reply["engine"] == "stub"
+        # Named on every reply, whichever it is, so a mask is never ambiguous
+        # about what produced it.
+        assert reply["engine"] in {"stub", "onnx"}
         png = base64.b64decode(reply["mask_png_b64"])
         with Image.open(io.BytesIO(png)) as mask:
             assert mask.mode == "L"
