@@ -43,7 +43,9 @@
 
   #stage { position:relative; width:100%; aspect-ratio:16/9; background:#000; border-radius:10px; overflow:hidden; border:1px solid var(--line); }
   #stage video, #stage canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
-  #overlay { mix-blend-mode:screen; opacity:.75; }
+  /* The overlay is transparent except where fire was predicted, so it
+     needs no blend mode: one used to make the whole frame look black. */
+  #overlay { opacity:.85; pointer-events:none; }
   .hint { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
           color:var(--muted); font-size:.9rem; text-align:center; padding:20px; }
 
@@ -87,6 +89,8 @@
     Stated before it was measured, and reported below whether or not it holds.
   </div>
 
+  <div class="panel warnbox note" id="banner" hidden></div>
+
   <div class="panel warnbox note" id="stubWarning" hidden>
     <strong>No trained model loaded.</strong> The service is serving a stub engine, so the
     masks below are a placeholder, not predictions. The latency numbers are still real.
@@ -97,7 +101,10 @@
       <div class="panel">
         <h2 id="stageTitle">Feed</h2>
         <div id="stage">
-          <video id="video" playsinline muted loop></video>
+          <!-- controls so a blocked autoplay leaves the viewer a play button
+               rather than a black rectangle; muted so autoplay is allowed in
+               the first place. -->
+          <video id="video" playsinline muted loop controls></video>
           <canvas id="overlay"></canvas>
           <div class="hint" id="hint">Press <b>Sample clip</b> for 16 seconds of real drone footage, or load your own.</div>
         </div>
@@ -174,6 +181,8 @@ const overlay = $("overlay");
 const ctx = overlay.getContext("2d");
 const scratch = document.createElement("canvas");
 const sctx = scratch.getContext("2d");
+const mask = document.createElement("canvas");
+const mctx = mask.getContext("2d", { willReadFrequently: true });
 
 let socket = null, running = false, stressing = false, inFlight = false;
 const samples = [];
@@ -183,6 +192,12 @@ fetch("health").then((r) => r.json()).then((h) => {
   $("engineLine").textContent = `engine: ${h.engine} · target ${h.target_fps} FPS · budget ${h.frame_budget_ms} ms`;
   if (!h.model_loaded) $("stubWarning").hidden = false;
 }).catch(() => {});
+
+function banner(message) {
+  const box = $("banner");
+  box.textContent = message;
+  box.hidden = !message;
+}
 
 const fmt = (v, n = 1) => (v === null || v === undefined ? "—" : v.toFixed(n));
 const row = (label, value, cls) =>
@@ -236,13 +251,31 @@ function connect() {
     img.onload = () => {
       overlay.width = video.videoWidth || 640;
       overlay.height = video.videoHeight || 360;
+
+      // Build the overlay so it is transparent everywhere the mask is dark,
+      // rather than painting a black rectangle and relying on a blend mode to
+      // cancel it. Blend modes made the whole frame look black whenever the
+      // compositing did not land as expected, which is indistinguishable from
+      // a broken video.
+      mask.width = img.width;
+      mask.height = img.height;
+      mctx.clearRect(0, 0, img.width, img.height);
+      mctx.drawImage(img, 0, 0);
+
+      const pixels = mctx.getImageData(0, 0, img.width, img.height);
+      const data = pixels.data;
+      for (let i = 0; i < data.length; i += 4) {
+        const p = data[i];            // greyscale probability
+        data[i] = 255;                // red
+        data[i + 1] = 59;
+        data[i + 2] = 48;
+        data[i + 3] = p < 128 ? 0 : p;  // transparent below the threshold
+      }
+      mctx.putImageData(pixels, 0, 0);
+
       ctx.clearRect(0, 0, overlay.width, overlay.height);
-      // Tint the single-channel mask red, then let the canvas scale it up.
-      ctx.drawImage(img, 0, 0, overlay.width, overlay.height);
-      ctx.globalCompositeOperation = "multiply";
-      ctx.fillStyle = "#ff3b30";
-      ctx.fillRect(0, 0, overlay.width, overlay.height);
-      ctx.globalCompositeOperation = "source-over";
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(mask, 0, 0, overlay.width, overlay.height);
     };
     img.src = "data:image/png;base64," + msg.mask_png_b64;
 
@@ -283,7 +316,11 @@ $("toggle").addEventListener("click", () => {
   $("stress").disabled = !running;
   if (running) {
     if (!socket || socket.readyState > 1) connect();
-    video.play().catch(() => {});
+    // A rejected play() used to be swallowed, which left a black rectangle and
+    // no way to tell whether the video, the model or the socket was at fault.
+    video.play().then(() => { banner(""); }).catch((err) => {
+      banner(`The browser blocked playback (${err.name}). Press play on the video itself.`);
+    });
     loop();
   } else {
     clearTimeout(timer);
