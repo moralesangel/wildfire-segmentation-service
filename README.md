@@ -116,12 +116,38 @@ not an interpolation across a wide bucket.
 
 ## Running it
 
+The trained model ships with the repo (7.8 MB), so a clone serves real
+predictions rather than the stub.
+
 ```bash
 uv venv && uv pip install -e ".[dev]"
-uv run uvicorn service.app:app --reload
+uv run uvicorn service.app:app --port 8000
 ```
 
-Then `http://127.0.0.1:8000` for the demo, `/health`, `/metrics`.
+Or with Docker, which is the same image that deploys, so what runs locally is
+what runs in production:
+
+```bash
+docker build -t wfs .
+docker run --rm -p 7860:7860 wfs
+```
+
+Then open `http://127.0.0.1:8000` (or `:7860` under Docker), load a video or
+point it at your camera, and press Start. `/health` and `/metrics` are there
+too.
+
+Two things worth doing once it is up:
+
+- **Press Stress test.** Frames go out as fast as the browser can send them,
+  the queue overflows, and *dropped* climbs while latency stays flat. That is
+  the drop policy working — the service shedding load rather than falling
+  behind.
+- **Watch the split, not the total.** `/metrics` breaks latency down by stage,
+  and on a 4K source the decode is most of it.
+
+Note that Docker limits the container's CPU differently from a bare process, so
+the numbers under Docker will be slower than the ones above. Both are honest;
+they answer different questions.
 
 **With no checkpoint the service still starts**, serving a stub engine that
 returns a crude red-minus-blue response. That is deliberate: a container that

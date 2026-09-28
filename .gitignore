@@ -2,10 +2,14 @@
 data/
 *.zip
 
-# Model checkpoints are build artifacts of training, not source.
-models/*.onnx
+# The PyTorch checkpoint is a build artifact of training.
 models/*.pt
 models/*.pth
+
+# The exported ONNX is not: at 7.8 MB it ships with the repo, so a clone
+# serves the real model rather than the stub. Without it every visitor would
+# measure a placeholder and see placeholder masks.
+!models/*.onnx
 
 __pycache__/
 *.py[cod]
