@@ -15,26 +15,30 @@ jobs:
         with:
           enable-cache: true
 
+      # A venv rather than --system: the runner's interpreter is externally
+      # managed (PEP 668) and refuses to be installed into.
       - name: Install
-        run: uv pip install --system -e ".[dev]"
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
 
       - name: Lint
-        run: python -m ruff check .
+        run: uv run python -m ruff check .
 
       - name: Format
-        run: python -m ruff format --check .
+        run: uv run python -m ruff format --check .
 
       - name: Types
-        run: python -m mypy src
+        run: uv run python -m mypy src
 
       - name: Tests
-        run: python -m pytest -q
+        run: uv run python -m pytest -q
 
       # The benchmark runs in CI as a smoke test of the measurement path, not
       # as a gate: a shared runner's timings say nothing about the budget, and
       # failing the build on them would only teach people to ignore it.
       - name: Benchmark smoke test
-        run: python scripts/benchmark.py --frames 5 --sizes 128
+        run: uv run python scripts/benchmark.py --frames 5 --sizes 128
 
   docker:
     runs-on: ubuntu-latest
