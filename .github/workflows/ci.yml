@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Format
+        run: python -m ruff format --check .
+
+      - name: Types
+        run: python -m mypy src
+
+      - name: Tests
+        run: python -m pytest -q
+
+      # The benchmark runs in CI as a smoke test of the measurement path, not
+      # as a gate: a shared runner's timings say nothing about the budget, and
+      # failing the build on them would only teach people to ignore it.
+      - name: Benchmark smoke test
+        run: python scripts/benchmark.py --frames 5 --sizes 128
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the serving image
+        run: docker build -t wfs:ci .
+
+      - name: It starts and answers
+        run: |
+          docker run -d --name wfs -p 7860:7860 wfs:ci
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:7860/health > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf http://localhost:7860/health | tee /dev/stderr | grep -q '"status":"ok"'
+          curl -sf http://localhost:7860/metrics | grep -q wfs_frame_latency_seconds
+          docker rm -f wfs

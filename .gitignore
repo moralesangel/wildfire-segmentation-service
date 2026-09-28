@@ -1,0 +1,25 @@
+# Data: FLAME is 5 GB and carries its own licence. Fetch it yourself.
+data/
+*.zip
+
+# Model checkpoints are build artifacts of training, not source.
+models/*.onnx
+models/*.pt
+models/*.pth
+
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.env
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
