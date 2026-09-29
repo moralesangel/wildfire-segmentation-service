@@ -23,7 +23,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from service import metrics, preprocess
 from service.batcher import Batcher, QueueFull
-from service.config import FRAME_BUDGET_MS, TARGET_FPS, Settings
+from service.config import FRAME_BUDGET_MS, TARGET_FPS, Settings, resolve_threads
 from service.engine import load_engine
 
 
@@ -54,7 +54,8 @@ _STATIC = _static_dir()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = Settings.from_env()
-    engine = load_engine(settings.model_path, threads=settings.onnx_threads)
+    threads = resolve_threads(settings.onnx_threads)
+    engine = load_engine(settings.model_path, threads=threads)
     batcher = Batcher(engine, settings)
     await batcher.start()
 
@@ -91,6 +92,7 @@ async def health() -> dict[str, object]:
         # Reported because a missing static dir shows up as a 404 on the
         # sample clip, which looks like a broken video rather than a
         # misconfigured path.
+        "onnx_threads": resolve_threads(app.state.settings.onnx_threads),
         "static_dir": str(_STATIC),
         "sample_clip": (_STATIC / "sample.mp4").is_file(),
     }

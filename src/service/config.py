@@ -68,9 +68,8 @@ class Settings:
     Waiting trades latency for throughput. At 66 ms of total budget, 5 ms is
     about as much as can be spent hoping for company."""
 
-    onnx_threads: int = 2
-    """Intra-op threads. Hugging Face Spaces' free tier gives 2 vCPU, so
-    asking for more oversubscribes and makes things slower, not faster."""
+    onnx_threads: int = 0
+    """Intra-op threads, 0 meaning "decide from the host" -- see `resolve_threads`."""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -82,3 +81,25 @@ class Settings:
             batch_wait_ms=float(os.getenv("WFS_BATCH_WAIT_MS", cls.batch_wait_ms)),
             onnx_threads=int(os.getenv("WFS_ONNX_THREADS", cls.onnx_threads)),
         )
+
+
+def resolve_threads(requested: int) -> int:
+    """Intra-op threads to give ONNX Runtime.
+
+    A fixed 2 was right for Hugging Face Spaces' free tier and wasteful
+    everywhere else: on a 14-core laptop it left most of the machine idle.
+    Letting ONNX Runtime decide is worse still -- it sizes from the host's core
+    count, and measured here that was the slowest setting of all:
+
+        1 thread   32.3 ms      4 threads  20.4 ms
+        2 threads  17.8 ms      8 threads  14.0 ms
+                               14 threads  48.6 ms   <- all cores, 3.5x worse
+
+    The cap exists because past a point the threads spend longer synchronising
+    over a 128x128 tensor than computing it. Half the cores, bounded at 8,
+    stays on the good side of that on every machine tested.
+    """
+    if requested > 0:
+        return requested
+    cores = os.cpu_count() or 2
+    return max(1, min(8, cores // 2))

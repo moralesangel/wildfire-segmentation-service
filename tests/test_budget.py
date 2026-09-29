@@ -142,3 +142,32 @@ class TestQueueBoundMeansWhatItSays:
                 await batcher.stop()
 
         asyncio.run(scenario())
+
+
+class TestThreadResolution:
+    """Threads were pinned to 2 for a 2-vCPU host, which wasted a 14-core one."""
+
+    def test_an_explicit_setting_is_respected(self) -> None:
+        from service.config import resolve_threads
+
+        assert resolve_threads(4) == 4
+
+    def test_zero_means_decide_from_the_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from service import config
+
+        monkeypatch.setattr(config.os, "cpu_count", lambda: 14)
+        assert config.resolve_threads(0) == 7
+
+    def test_it_never_takes_every_core(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # All 14 threads measured 48.6 ms against 14.0 ms at 8: past a point
+        # they synchronise over a 128x128 tensor for longer than they compute.
+        from service import config
+
+        monkeypatch.setattr(config.os, "cpu_count", lambda: 64)
+        assert config.resolve_threads(0) == 8
+
+    def test_a_single_core_host_still_gets_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from service import config
+
+        monkeypatch.setattr(config.os, "cpu_count", lambda: 1)
+        assert config.resolve_threads(0) == 1

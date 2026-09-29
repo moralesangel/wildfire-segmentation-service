@@ -25,7 +25,7 @@ so it cannot quietly become whatever the benchmark happened to produce.
 ## The result
 
 **The budget holds.** With the trained U-Net, measured end to end on an idle
-machine:
+machine against 4K source frames:
 
 | Stage | p50 | p95 | share |
 |---|---|---|---|
@@ -40,6 +40,23 @@ And the point of the exercise is in the third column. **Decoding one 4K frame
 costs four and a half times the inference it feeds.** A service that reported
 model latency would have called itself fast at 9.9 ms while spending 81% of its
 budget somewhere it never looked.
+
+### The bottleneck moves with the frame size
+
+That table is for 4K input. The browser demo sends 960×540 — 32× fewer pixels
+to decode — and the ranking inverts completely:
+
+| Stage | 4K source | Browser (960×540) |
+|---|---|---|
+| decode | **80.9%** | 10% |
+| inference | 18.0% | **88%** |
+| encode | 0.7% | 2% |
+
+Neither number is wrong; they answer different questions, and quoting one as
+*the* bottleneck would be the same mistake this project is about. **Whether the
+model or the decode dominates is a property of the input, not of the service.**
+`/metrics` breaks it down per stage precisely so the answer comes from the
+deployment rather than from this README.
 
 The model: Dice **0.889**, IoU **0.800**, recall 0.895, precision 0.883 on a
 held-out fifth of FLAME. 1.9M parameters. Best epoch was 40 of 40 — it hit the
